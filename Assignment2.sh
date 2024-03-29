@@ -1,165 +1,104 @@
 #!/bin/bash
 
-# Function to display messages with formatting
-print_message() {
-    echo "**********************"
-    echo "$1"
-    echo "**********************"
-}
 
-# Function to configure the network
+# Function to update network configuration using netplan
 configure_network() {
-    echo "Configuring the network..."
-    cat <<EOF | sudo tee /etc/netplan/50-cloud-init.yaml > /dev/null
+    log "Configuring network..."
+
+    # Modify the netplan configuration file with specific network settings
+    cat <<EOF | sudo tee /etc/netplan/50-cloud-init.yaml >/dev/null
 network:
   version: 2
   renderer: networkd
   ethernets:
-    eth1:
+    eth0:
       dhcp4: no
-      addresses: [192.168.16.22/24]
-      routes:
-        - to: 0.0.0.0/0
-          via: 192.168.16.1
+      addresses:
+        - 192.168.16.21/24
+      gateway4: 192.168.16.1
       nameservers:
         addresses: [192.168.16.1]
         search: [home.arpa, localdomain]
 EOF
 
+    # Apply netplan changes
     sudo netplan apply
 }
 
-# Call the function to configure the network
-configure_network
+# Function to install required software and configure firewall
+install_software() {
+    log "Installing software and configuring firewall..."
 
-# Function to update the /etc/hosts file
-update_hosts() {
-    print_message "Updating /etc/hosts File"
-    local new_entry="192.168.16.21    server1"
-
-    # Remove old entry if present
-sudo grep -v '^192\.168\.16\.21[[:space:]]\+server1$' /etc/hosts | sudo tee /etc/hosts >/dev/null
-
-    # Add new entry
-    echo "$new_entry" | sudo tee -a /etc/hosts >/dev/null
-}
-
-# Update /etc/hosts file
-update_hosts
-
-# Function to display messages with formatting
-print_message() {
-    echo "**********************"
-    echo "$1"
-    echo "**********************"
-}
-
-# Function to install Apache2
-install_apache() {
-    print_message "Installing Apache2"
+    # Update package repository and install necessary software packages
     sudo apt update
-    sudo apt install -y apache2
-}
+    sudo apt install -y openssh-server apache2 squid
 
-# Function to install Squid
-install_squid() {
-    print_message "Installing Squid"
-    sudo apt update
-    sudo apt install -y squid
-}
+    # Configure SSH to allow key authentication and disable password authentication
+    sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+    sudo systemctl restart ssh
 
-# Function to start and enable Apache2 service
-start_apache() {
-    print_message "Starting and Enabling Apache2 Service"
-    sudo systemctl start apache2
-    sudo systemctl enable apache2
-}
+    # Configure Apache to listen on specific IP addresses and ports
+    sudo sed -i 's/Listen 80/Listen 192.168.16.21:80/' /etc/apache2/ports.conf
+    sudo sed -i 's/<VirtualHost \*:80>/<VirtualHost 192.168.16.21:80>/' /etc/apache2/sites-available/000-default.conf
+    sudo sed -i 's/Listen 443/Listen 192.168.16.21:443/' /etc/apache2/ports.conf
+    sudo sed -i 's/<VirtualHost default:443>/<VirtualHost 192.168.16.21:443>/' /etc/apache2/sites-available/default-ssl.conf
+    sudo systemctl restart apache2
 
-# Function to start and enable Squid service
-start_squid() {
-    print_message "Starting and Enabling Squid Service"
-    sudo systemctl start squid
-    sudo systemctl enable squid
-}
+    # Configure Squid web proxy on a specific IP address and port
+    sudo sed -i 's/http_port 3128/http_port 192.168.16.21:3128/' /etc/squid/squid.conf
+    sudo systemctl restart squid
 
-
-# Install Apache2
-install_apache
-
-# Start and enable Apache2 service
-start_apache
-
-# Install Squid
-install_squid
-
-# Start and enable Squid service
-start_squid
-
-# Function to enable UFW and configure firewall rules
-configure_firewall() {
-    print_message "Configuring Firewall with UFW"
-    
-    # Enable UFW
+    # Enable UFW and allow necessary services through the firewall
     sudo ufw enable
-
-    # Allow SSH on port 22 only on the management network
-    sudo ufw allow from <mgmt_network_ip> to any port 22
-
-    # Allow HTTP on both interfaces
-    sudo ufw allow http
-
-    # Allow web proxy on both interfaces (assuming default Squid proxy port 3128)
-    sudo ufw allow 3128
-
-    # Reload UFW to apply changes
-    sudo ufw reload
+    sudo ufw allow 22/tcp
+    sudo ufw allow 80/tcp
+    sudo ufw allow 443/tcp
+    sudo ufw allow 3128/tcp
 }
 
-
-# Configure firewall rules using UFW
-configure_firewall
-
-# Function to display messages with formatting
-print_message() {
-    echo "**********************"
-    echo "$1"
-    echo "**********************"
-}
-
-# Function to create user accounts with specified configuration
+# Function to create user accounts with SSH keys and sudo access
 create_users() {
-    print_message "Creating User Accounts"
+    log "Creating user accounts..."
 
-    # List of users to create
+    # Create users and configure SSH keys for each user
     local users=("dennis" "aubrey" "captain" "snibbles" "brownie" "scooter" "sandy" "perrier" "cindy" "tiger" "yoda")
-
-    # Create users with home directory and bash shell
     for user in "${users[@]}"; do
-        sudo useradd -m -s /bin/bash "$user"
-        echo "User '$user' created."
+        if ! id "$user" &>/dev/null; then
+            log "Creating user: $user"
 
-        # Generate RSA and Ed25519 keys for the user
-        sudo -u "$user" ssh-keygen -t rsa -N "" -f "/home/$user/.ssh/id_rsa"
-        sudo -u "$user" ssh-keygen -t ed25519 -N "" -f "/home/$user/.ssh/id_ed25519"
+            sudo useradd -m -s /bin/bash "$user" # Add a user with a specified username and default shell
+            sudo mkdir -p "/home/$user/.ssh"
+            sudo touch "/home/$user/.ssh/authorized_keys"
+            sudo chown -R "$user:$user" "/home/$user/.ssh"
 
-        # Append RSA and Ed25519 public keys to authorized_keys file
-        cat "/home/$user/.ssh/id_rsa.pub" | sudo -u "$user" tee -a "/home/$user/.ssh/authorized_keys" >/dev/null
-        cat "/home/$user/.ssh/id_ed25519.pub" | sudo -u "$user" tee -a "/home/$user/.ssh/authorized_keys" >/dev/null
-
-        echo "SSH keys generated and added for user '$user'."
+            # Add SSH public keys for users based on their usernames
+            case "$user" in
+                "dennis")
+                    echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG4rT3vTt99Ox5kndS4HmgTrKBT8SKzhK4rhGkEVGlCI student@generic-vm" | sudo tee -a "/home/$user/.ssh/authorized_keys" >/dev/null
+                    ;;
+                *)
+                    # For other users, add their public keys here (This part is left as a placeholder)
+                    echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCezTPysKYTPTnrdXzlSmlbPtjQDebgWwHmE1QfM7LIuCNuKQZprVkbe+wfX4J+Rgp5vN0KHaxW8w/aRgB4yl7B8kTvW84OKcS1EACoKGl9Jrwb" | sudo tee -a "/home/$user/.ssh/authorized_keys" >/dev/null
+                    ;;
+            esac
+            log "SSH keys added for user: $user"
+        else
+            log "User '$user' already exists. Skipping creation."
+        fi
     done
-}
 
-# Function to grant sudo access to dennis
-grant_sudo_access() {
-    print_message "Granting Sudo Access to Dennis"
+    # Grant sudo access to the 'dennis' user
     sudo usermod -aG sudo dennis
-    echo "Sudo access granted to user 'dennis'."
+    log "Sudo access granted to user 'dennis'."
 }
 
+# Main function to execute the script
+main() {
+    configure_network
+    install_software
+    create_users
+    log "Script execution completed successfully!" # Notifies about the successful completion of the script
+}
 
-# Create user accounts
-create_users
-
-# Grant sudo access to dennis
-grant_sudo_access
+# Execute the main function
+main
