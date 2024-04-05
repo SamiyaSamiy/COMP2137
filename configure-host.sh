@@ -1,36 +1,52 @@
+#!/bin/bash
+
 log_changes() {
     [ "$VERBOSE" = true ] && echo "$1"
     logger "$1"
 }
 
 update_hostname() {
-    local desired_name="$1"
-    if [ "$desired_name" != "$(hostname)" ]; then
-        hostnamectl set-hostname "$desired_name"
-        sed -i "s/$(hostname)/$desired_name/g" /etc/hosts
-        echo "$desired_name" > /etc/hostname
-        log_changes "Hostname updated to $desired_name"
+    local new_hostname="$1"
+    current_hostname=$(hostname)
+    
+    if [ "$new_hostname" != "$current_hostname" ]; then
+        sudo hostnamectl set-hostname "$new_hostname"
+        log_changes "Hostname updated to $new_hostname"
+        echo "Hostname updated to $new_hostname"
+    else
+        log_changes "Hostname is already set to $new_hostname"
     fi
 }
 
+log_message() {
+    echo "$(date +'%Y-%m-%d %H:%M:%S') - $1" >> /var/log/hostname_change.log
+}
+
+update_hostname "desired_hostname"
+
 update_ip() {
-    local desired_ip="$1"
-    if [ "$desired_ip" != "$(hostname -I | awk '{print $1}')" ]; then
-        sed -i "/^.*$(hostname -I | awk '{print $1}').*/c\\$desired_ip $HOSTNAME" /etc/hosts
-        sed -i "s/address .*/address $desired_ip/g" /etc/netplan/*.yaml
+    local new_ip="$1"
+    if [ "$new_ip" != "$(hostname -I | awk '{print $1}')" ]; then
+        sed -i "/^.*$(hostname -I | awk '{print $1}').*/c\\$new_ip $HOSTNAME" /etc/hosts
+        sed -i "s/address .*/address $new_ip/g" /etc/netplan/*.yaml
         netplan apply
-        log_changes "IP address updated to $desired_ip"
+        log_changes "IP address updated to $new_ip"
     fi
 }
 
 update_host_entry() {
     local desired_name="$1"
     local desired_ip="$2"
-    if ! grep -q "$desired_name" /etc/hosts; then
-        echo "$desired_ip $desired_name" >> /etc/hosts
-        log_changes "Added $desired_name with IP $desired_ip to /etc/hosts"
+    if grep -q "$desired_name" /etc/hosts; then
+        log_changes "Host entry already exists for $desired_name with IP $desired_ip"
+    else
+        echo "$desired_ip    $desired_name" | sudo tee -a /etc/hosts >/dev/null
+        log_changes "Host entry added for $desired_name with IP $desired_ip"
+        echo "Host entry added for $desired_name with IP $desired_ip"
     fi
 }
+
+update_host_entry "desired_hostname" "desired_ip"
 
 trap '' TERM HUP INT
 
@@ -47,3 +63,4 @@ if [ -n "$HOST_ENTRY" ]; then
 fi
 
 exit 0
+
